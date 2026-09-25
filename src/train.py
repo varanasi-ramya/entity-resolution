@@ -1,4 +1,3 @@
-
 """Train LightGBM pairwise classifier; tune threshold for set-F1."""
 import os, json
 import numpy as np
@@ -41,20 +40,32 @@ def train(out_dir, gt_parquet, seed=42):
 
     feat = pd.read_parquet(f'{out_dir}/features_train.parquet')
     gt   = pd.read_parquet(gt_parquet)
-    gt_sets = {str(r['source1_entity_id']): _parse_gt_set(r['matched_entity_ids'])
-               for _, r in gt.iterrows()}
 
+    # vectorized instead of .iterrows() — same result, seconds not minutes
+    gt_sets = dict(zip(
+        gt['source1_entity_id'].astype(str),
+        gt['matched_entity_ids'].map(_parse_gt_set),
+    ))
+
+    feat['s1_id_str'] = feat['s1_id'].astype(str)
     feat['label'] = [
-        1 if str(c) in gt_sets.get(str(s), set()) else 0
-        for s, c in zip(feat['s1_id'], feat['cand_id'])
+        1 if str(c) in gt_sets.get(s, set()) else 0
+        for s, c in zip(feat['s1_id_str'], feat['cand_id'])
     ]
     pos = int(feat['label'].sum())
     print(f"  train rows={len(feat):,} pos={pos:,} ({100*pos/len(feat):.2f}%)")
 
-    s1_ids = feat['s1_id'].astype(str).unique()
-    tr_ids, va_ids = train_test_split(s1_ids, test_size=0.15, random_state=seed)
-    tr = feat[feat['s1_id'].astype(str).isin(tr_ids)].copy()
-    va = feat[feat['s1_id'].astype(str).isin(va_ids)].copy()
+    # Split on the FULL ground-truth S1 id list, not just ids that
+    # survived blocking — otherwise S1 entities blocking missed entirely
+    # are silently excluded from validation, and val_f1 reads more
+    # optimistic than what the real test-set scoring will show.
+    all_gt_ids = list(gt_sets.keys())
+    tr_ids_full, va_ids_full = train_test_split(all_gt_ids, test_size=0.15, random_state=seed)
+    tr_ids_full = set(tr_ids_full)
+    va_ids_full = set(va_ids_full)
+
+    tr = feat[feat['s1_id_str'].isin(tr_ids_full)].copy()
+    va = feat[feat['s1_id_str'].isin(va_ids_full)].copy()
 
     X_tr, y_tr = tr[FEATURES], tr['label']
     X_va, y_va = va[FEATURES], va['label']
@@ -78,9 +89,13 @@ def train(out_dir, gt_parquet, seed=42):
 
     va = va.copy()
     va['proba'] = model.predict(X_va)
-    val_s1 = va['s1_id'].astype(str).values
+    val_s1 = va['s1_id_str'].values
     val_c  = va['cand_id'].astype(str).values
-    val_true = {sid: gt_sets.get(sid, set()) for sid in va_ids}
+
+    # true sets over ALL held-out ids, including ones with zero candidates
+    # (they correctly count as prediction-vs-nonempty-truth penalties, or
+    # 1.0 if both are empty — matching how predict.py's output is scored)
+    val_true = {sid: gt_sets.get(sid, set()) for sid in va_ids_full}
 
     best_t, best_f1 = 0.5, -1.0
     for t in np.arange(0.30, 0.91, 0.02):
@@ -91,6 +106,9 @@ def train(out_dir, gt_parquet, seed=42):
         f1 = set_f1(pred_sets, val_true)
         if f1 > best_f1:
             best_f1, best_t = f1, float(t)
+
+    tmp = thr_path + '.tmp'
     json.dump({'threshold': best_t, 'val_f1': best_f1, 'val_auc': float(auc)},
-              open(thr_path, 'w'))
+              open(tmp, 'w'))
+    os.replace(tmp, thr_path)
     print(f"  threshold={best_t:.2f} | val set-F1={best_f1:.4f}")
