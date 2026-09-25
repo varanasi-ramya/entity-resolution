@@ -9,7 +9,7 @@ def _register_udf(con):
     con.create_function(
         'soundex_py',
         lambda x: jellyfish.soundex(x) if x else None,
-        [duckdb.types.VARCHAR], duckdb.types.VARCHAR,
+        ['VARCHAR'], 'VARCHAR',
     )
 
 
