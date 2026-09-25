@@ -1,4 +1,3 @@
-
 """
 Normalization pipeline for Amazon ML entity resolution.
 
@@ -52,7 +51,18 @@ _SCRIPT_RANGES = [
     (0x0D00, 0x0D7F, sanscript.MALAYALAM),
 ]
 
+# Single regex covering every script range above — used as a fast C-level
+# pre-check so pure-Latin text (the vast majority of rows) never touches
+# the per-character Python loop below.
+_INDIC_RE = re.compile(
+    '[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF'
+    '\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]'
+)
+
+
 def _detect_script(text):
+    if not text or not _INDIC_RE.search(text):
+        return None
     for ch in text:
         cp = ord(ch)
         for lo, hi, scheme in _SCRIPT_RANGES:
@@ -60,8 +70,9 @@ def _detect_script(text):
                 return scheme
     return None
 
-def to_latin(text):
-    if not text:
+
+def to_latin(text, skip=False):
+    if not text or skip:
         return text
     scheme = _detect_script(text)
     if scheme is None:
@@ -71,7 +82,8 @@ def to_latin(text):
     except Exception:
         return text
 
-def normalize_text(text):
+
+def normalize_text(text, skip_translit=False):
     if text is None:
         return None
     if not isinstance(text, str):
@@ -80,7 +92,7 @@ def normalize_text(text):
     if text == '' or text.lower() in ('null', 'nan', 'none', 'na', 'n/a'):
         return None
 
-    text = to_latin(text)
+    text = to_latin(text, skip=skip_translit)
     text = unicodedata.normalize('NFKC', text).lower()
     text = _PUNCT.sub(' ', text)
     text = _WS.sub(' ', text).strip()
@@ -90,11 +102,13 @@ def normalize_text(text):
 
     return text if text else None
 
+
 def extract_street_num(addr_norm):
     if not addr_norm:
         return None
     m = _STREET_NUM.match(addr_norm)
     return m.group(1) if m else None
+
 
 def extract_zip(addr_norm, country):
     if not addr_norm or not country:
@@ -107,6 +121,7 @@ def extract_zip(addr_norm, country):
         m = _ZIP_IN.search(addr_norm)
         return m.group(1) if m else None
     return None
+
 
 def extract_state(addr_raw, country):
     if not addr_raw or not country:
@@ -122,6 +137,26 @@ def extract_state(addr_raw, country):
             return t
     return None
 
+
+def _is_india(country):
+    return isinstance(country, str) and country.upper() in ('IN', 'INDIA')
+
+
+def ingest_tsv(in_tsv, out_parquet):
+    """Read a raw TSV straight into parquet. Skips if already done.
+    Required before normalize_source can run on a clean Drive."""
+    if os.path.exists(out_parquet):
+        return
+    import duckdb
+    tmp = out_parquet + '.tmp'
+    duckdb.connect().execute(f"""
+        COPY (SELECT * FROM read_csv_auto('{in_tsv}', delim='\t', header=True))
+        TO '{tmp}' (FORMAT PARQUET)
+    """)
+    os.replace(tmp, out_parquet)
+    print(f"  ingested {os.path.basename(out_parquet)}")
+
+
 def normalize_source(in_parquet, out_parquet, chunksize=500_000):
     if os.path.exists(out_parquet):
         print(f"  {os.path.basename(out_parquet):40s} (already done)")
@@ -130,40 +165,53 @@ def normalize_source(in_parquet, out_parquet, chunksize=500_000):
 
     pf = pq.ParquetFile(in_parquet)
     n_total = pf.metadata.num_rows
-    pass
+    tmp_path = out_parquet + '.tmp'
     writer = None
     t0 = time.time()
-    done = 0
 
-    for batch in pf.iter_batches(batch_size=chunksize):
-        df = batch.to_pandas()
-        df['name_norm'] = df['business_name'].map(normalize_text)
-        df['addr_norm'] = df['business_address'].map(normalize_text)
-        df['country']   = df['country'].astype(str).str.upper().str.strip()
+    try:
+        for batch in pf.iter_batches(batch_size=chunksize):
+            df = batch.to_pandas()
+            df['country'] = df['country'].astype(str).str.upper().str.strip()
+            skip_translit = ~df['country'].map(_is_india)
 
-        df['street_num'] = df['addr_norm'].map(extract_street_num)
-        df['state']      = [
-            extract_state(a, c)
-            for a, c in zip(df['business_address'], df['country'])
-        ]
-        df['zip']        = [
-            extract_zip(a, c) for a, c in zip(df['addr_norm'], df['country'])
-        ]
+            df['name_norm'] = [
+                normalize_text(t, skip_translit=s)
+                for t, s in zip(df['business_name'], skip_translit)
+            ]
+            df['addr_norm'] = [
+                normalize_text(t, skip_translit=s)
+                for t, s in zip(df['business_address'], skip_translit)
+            ]
 
-        out_df = df[[
-            'entity_id', 'name_norm', 'addr_norm',
-            'country', 'state', 'street_num', 'zip',
-        ]]
-        table = pa.Table.from_pandas(out_df, preserve_index=False)
-        if writer is None:
-            writer = pq.ParquetWriter(out_parquet, table.schema,
-                                      compression='zstd')
-        writer.write_table(table)
-        done += len(df)
-        pass
+            df['street_num'] = df['addr_norm'].map(extract_street_num)
+            df['state'] = [
+                extract_state(a, c)
+                for a, c in zip(df['business_address'], df['country'])
+            ]
+            df['zip'] = [
+                extract_zip(a, c) for a, c in zip(df['addr_norm'], df['country'])
+            ]
 
-    if writer is not None:
-        writer.close()
+            out_df = df[[
+                'entity_id', 'name_norm', 'addr_norm',
+                'country', 'state', 'street_num', 'zip',
+            ]]
+            table = pa.Table.from_pandas(out_df, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(tmp_path, table.schema, compression='zstd')
+            writer.write_table(table)
+
+        if writer is not None:
+            writer.close()
+        os.replace(tmp_path, out_parquet)   # atomic — only visible on full success
+    except Exception:
+        if writer is not None:
+            writer.close()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
     print(f"  {os.path.basename(out_parquet):40s} {n_total:>10,} rows  {time.time()-t0:6.1f}s")
 
 
@@ -179,4 +227,5 @@ def normalize_sources(train_dir, test_dir, out_dir):
     for in_tsv, out_pq in jobs:
         base = os.path.basename(in_tsv).replace('.tsv', '.parquet')
         in_parquet = f'{out_dir}/{base}'
+        ingest_tsv(in_tsv, in_parquet)
         normalize_source(in_parquet, out_pq)
