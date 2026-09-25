@@ -1,4 +1,3 @@
-
 """Pairwise feature engineering on candidate pairs."""
 import os
 import numpy as np
@@ -6,10 +5,13 @@ import pandas as pd
 from rapidfuzz import fuzz
 import jellyfish
 
+# city_match removed — there was no city column being extracted; the old
+# line compared state to state a second time (copy-paste bug), adding a
+# redundant, noisy column with no real signal.
 FEATURES = [
     'lev_ratio', 'token_sort', 'jaro_winkler',
     'addr_token_sort',
-    'city_match', 'state_match', 'street_num_match',
+    'state_match', 'street_num_match',
     'cand_addr_missing', 'name_len_diff', 'name_token_overlap',
 ]
 
@@ -42,11 +44,11 @@ def build_features(out_dir, split='train'):
     m = cand.merge(
         s1.rename(columns={c: f'a_{c}' for c in s1.columns if c != 'entity_id'}),
         left_on='s1_id', right_on='entity_id', how='left',
-    ).merge(
+    ).drop(columns=['entity_id']).merge(
         others.rename(columns={c: f'b_{c}' for c in others.columns
                                if c != 'entity_id'}),
         left_on='cand_id', right_on='entity_id', how='left',
-    )
+    ).drop(columns=['entity_id'])
 
     a_name = m['a_name_norm'].fillna('').astype(str).values
     b_name = m['b_name_norm'].fillna('').astype(str).values
@@ -60,7 +62,6 @@ def build_features(out_dir, split='train'):
                             for a,b in zip(a_name,b_name)],
         'addr_token_sort': [fuzz.token_sort_ratio(a,b)/100.0
                             for a,b in zip(a_addr,b_addr)],
-        'city_match':      (m['a_state'].fillna('_') == m['b_state'].fillna('~')).astype('int8'),
         'state_match':     (m['a_state'].fillna('_') == m['b_state'].fillna('~')).astype('int8'),
         'street_num_match':(m['a_street_num'].fillna('_') == m['b_street_num'].fillna('~')).astype('int8'),
         'cand_addr_missing': m['b_addr_norm'].isna().astype('int8'),
@@ -73,5 +74,7 @@ def build_features(out_dir, split='train'):
         m[['s1_id','cand_id','cand_source']].reset_index(drop=True),
         feats.reset_index(drop=True),
     ], axis=1)
-    out.to_parquet(out_pq, index=False, compression='zstd')
+    tmp = out_pq + '.tmp'
+    out.to_parquet(tmp, index=False, compression='zstd')
+    os.replace(tmp, out_pq)
     print(f"  features_{split}.parquet                {len(out):>10,} rows")
