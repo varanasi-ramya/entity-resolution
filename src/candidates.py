@@ -1,5 +1,4 @@
-
-"""Union symbolic + ANN candidates; attach labels from ground truth."""
+"""Union symbolic + ANN candidates."""
 import os
 import pandas as pd
 
@@ -25,5 +24,7 @@ def union_candidates(out_dir, split='train'):
         d['cand_source'] = tbl
         parts.append(d[['s1_id','cand_id','cand_source']])
     u = pd.concat(parts, ignore_index=True).drop_duplicates(['s1_id','cand_id'])
-    u.to_parquet(out_pq, index=False, compression='zstd')
+    tmp = out_pq + '.tmp'
+    u.to_parquet(tmp, index=False, compression='zstd')
+    os.replace(tmp, out_pq)
     print(f"  candidates_{split}.parquet              {len(u):>10,} pairs")
