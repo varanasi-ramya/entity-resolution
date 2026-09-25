@@ -30,21 +30,29 @@ def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
     con.execute(f"""
         COPY (
             WITH a AS (
-                SELECT entity_id, name_norm, country, state
+                SELECT entity_id, name_norm, country, state,
+                       soundex_py(name_norm) AS sdx
                 FROM '{s1_clean}'
                 WHERE name_norm IS NOT NULL AND country IS NOT NULL
             ),
             b AS (
-                SELECT entity_id, name_norm, country, state
+                SELECT entity_id, name_norm, country, state,
+                       soundex_py(name_norm) AS sdx
                 FROM '{other_clean}'
                 WHERE name_norm IS NOT NULL AND country IS NOT NULL
             ),
-            p1 AS (
-                SELECT a.entity_id AS s1_id, b.entity_id AS cand_id
+            p1_raw AS (
+                SELECT a.entity_id AS s1_id, b.entity_id AS cand_id,
+                       row_number() OVER (
+                           PARTITION BY a.entity_id ORDER BY b.entity_id
+                       ) AS rn
                 FROM a JOIN b
                   ON a.country = b.country
                  AND a.state = b.state
                  AND SUBSTR(a.name_norm, 1, 4) = SUBSTR(b.name_norm, 1, 4)
+            ),
+            p1 AS (
+                SELECT s1_id, cand_id FROM p1_raw WHERE rn <= 50
             ),
             p2_raw AS (
                 SELECT a.entity_id AS s1_id, b.entity_id AS cand_id,
@@ -54,7 +62,7 @@ def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
                 FROM a JOIN b
                   ON a.country = b.country
                  AND a.state = b.state
-                 AND soundex_py(a.name_norm) = soundex_py(b.name_norm)
+                 AND a.sdx = b.sdx
             ),
             p2 AS (
                 SELECT s1_id, cand_id FROM p2_raw WHERE rn <= 50
