@@ -12,6 +12,14 @@ def _register_udf(con):
     )
 
 
+def _configure(con, out_dir):
+    tmp_dir = f'{out_dir}/duckdb_tmp'
+    os.makedirs(tmp_dir, exist_ok=True)
+    con.execute("SET memory_limit='8GB'")
+    con.execute(f"SET temp_directory='{tmp_dir}'")
+    con.execute("PRAGMA threads=4")
+
+
 def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
     if os.path.exists(out_parquet):
         n = con.execute(f"SELECT COUNT(*) FROM '{out_parquet}'").fetchone()[0]
@@ -38,11 +46,18 @@ def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
                  AND a.state = b.state
                  AND SUBSTR(a.name_norm, 1, 4) = SUBSTR(b.name_norm, 1, 4)
             ),
-            p2 AS (
-                SELECT a.entity_id AS s1_id, b.entity_id AS cand_id
+            p2_raw AS (
+                SELECT a.entity_id AS s1_id, b.entity_id AS cand_id,
+                       row_number() OVER (
+                           PARTITION BY a.entity_id ORDER BY b.entity_id
+                       ) AS rn
                 FROM a JOIN b
                   ON a.country = b.country
+                 AND a.state = b.state
                  AND soundex_py(a.name_norm) = soundex_py(b.name_norm)
+            ),
+            p2 AS (
+                SELECT s1_id, cand_id FROM p2_raw WHERE rn <= 50
             ),
             u AS (
                 SELECT s1_id, cand_id FROM p1
@@ -61,6 +76,7 @@ def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
 def build_symbolic_candidates(out_dir, split='train'):
     con = duckdb.connect()
     _register_udf(con)
+    _configure(con, out_dir)
     s1 = f'{out_dir}/{split}_source1_clean.parquet'
     s2 = f'{out_dir}/{split}_source2_clean.parquet'
     s3 = f'{out_dir}/{split}_source3_clean.parquet'
