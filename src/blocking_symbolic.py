@@ -1,4 +1,3 @@
-
 """Symbolic candidate blocking via DuckDB (same-state prefix + soundex)."""
 import os, time
 import duckdb
@@ -19,6 +18,7 @@ def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
         print(f"  {os.path.basename(out_parquet):40s} (skip, {n:,} rows)")
         return
     t0 = time.time()
+    tmp = out_parquet + '.tmp'
     con.execute(f"""
         COPY (
             WITH a AS (
@@ -50,8 +50,9 @@ def _candidates_one_pair(con, s1_clean, other_clean, out_parquet, other_tag):
                 SELECT s1_id, cand_id FROM p2
             )
             SELECT s1_id, cand_id, '{other_tag}' AS cand_source FROM u
-        ) TO '{out_parquet}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        ) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """)
+    os.replace(tmp, out_parquet)
     n = con.execute(f"SELECT COUNT(*) FROM '{out_parquet}'").fetchone()[0]
     print(f"  {os.path.basename(out_parquet):40s} {n:>10,} pairs  "
           f"{time.time()-t0:6.1f}s")
