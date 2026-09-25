@@ -1,4 +1,3 @@
-
 """ANN candidate blocking via sentence-transformers + per-country FAISS."""
 import os, time
 import numpy as np
@@ -24,7 +23,9 @@ def _encode(texts, cache_path, bs=1024):
         texts, batch_size=bs, show_progress_bar=False,
         convert_to_numpy=True, normalize_embeddings=True,
     ).astype('float32')
-    np.save(cache_path, emb)
+    tmp = cache_path + '.tmp.npy'
+    np.save(tmp, emb)
+    os.replace(tmp, cache_path)
     return emb
 
 
@@ -36,6 +37,18 @@ def _load_texts(clean_parquet):
     return df, txt
 
 
+def _make_index(dim, use_gpu):
+    import faiss
+    idx = faiss.IndexFlatIP(dim)
+    if use_gpu:
+        try:
+            res = faiss.StandardGpuResources()
+            idx = faiss.index_cpu_to_gpu(res, 0, idx)
+        except Exception as e:
+            print(f"  [warn] GPU FAISS unavailable ({e}), falling back to CPU")
+    return idx
+
+
 def _ann_one_pair(split, out_dir, source_name, tag, k=20):
     s1_clean = f'{out_dir}/{split}_source1_clean.parquet'
     sX_clean = f'{out_dir}/{split}_{source_name}_clean.parquet'
@@ -45,7 +58,9 @@ def _ann_one_pair(split, out_dir, source_name, tag, k=20):
         print(f"  {os.path.basename(out_pq):40s} (skip, {n:,} rows)")
         return
 
-    import faiss
+    import torch
+    use_gpu = torch.cuda.is_available()
+
     t0 = time.time()
     df1, txt1 = _load_texts(s1_clean)
     df2, txt2 = _load_texts(sX_clean)
@@ -64,7 +79,7 @@ def _ann_one_pair(split, out_dir, source_name, tag, k=20):
         if len(m1) == 0 or len(m2) == 0:
             continue
         sub2 = emb2[m2]
-        idx = faiss.IndexFlatIP(sub2.shape[1])
+        idx = _make_index(sub2.shape[1], use_gpu)
         idx.add(sub2)
         D, I = idx.search(emb1[m1], k=min(k, len(m2)))
         for row, irow in enumerate(I):
@@ -75,9 +90,11 @@ def _ann_one_pair(split, out_dir, source_name, tag, k=20):
                 pairs.append((s1_id, s2_ids[m2[j]], tag))
 
     out = pd.DataFrame(pairs, columns=['s1_id','cand_id','cand_source'])
-    out.to_parquet(out_pq, index=False, compression='zstd')
+    tmp = out_pq + '.tmp'
+    out.to_parquet(tmp, index=False, compression='zstd')
+    os.replace(tmp, out_pq)
     print(f"  {os.path.basename(out_pq):40s} {len(out):>10,} pairs  "
-          f"{time.time()-t0:6.1f}s")
+          f"{time.time()-t0:6.1f}s  (gpu={use_gpu})")
 
 
 def build_ann_candidates(out_dir, split='train', k=20):
