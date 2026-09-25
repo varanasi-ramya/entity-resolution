@@ -124,13 +124,13 @@ def extract_state(addr_raw, country):
 
 def normalize_source(in_parquet, out_parquet, chunksize=500_000):
     if os.path.exists(out_parquet):
-        print(f"SKIP (exists): {out_parquet}")
+        print(f"  {os.path.basename(out_parquet):40s} (already done)")
         return
     import pyarrow as pa, pyarrow.parquet as pq
 
     pf = pq.ParquetFile(in_parquet)
     n_total = pf.metadata.num_rows
-    print(f"  {os.path.basename(in_parquet)}: {n_total:,} rows")
+    pass
     writer = None
     t0 = time.time()
     done = 0
@@ -160,12 +160,11 @@ def normalize_source(in_parquet, out_parquet, chunksize=500_000):
                                       compression='zstd')
         writer.write_table(table)
         done += len(df)
-        if done % (chunksize * 4) == 0 or done == n_total:
-            print(f"    {done:,}/{n_total:,}  ({time.time()-t0:.0f}s)")
+        pass
 
     if writer is not None:
         writer.close()
-    print(f"  -> {out_parquet}  ({time.time()-t0:.0f}s total)")
+    print(f"  {os.path.basename(out_parquet):40s} {n_total:>10,} rows  {time.time()-t0:6.1f}s")
 
 
 def normalize_sources(train_dir, test_dir, out_dir):
