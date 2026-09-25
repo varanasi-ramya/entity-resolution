@@ -1,0 +1,27 @@
+# Data / artifacts (never commit)
+*.tsv
+*.csv
+*.parquet
+*.npy
+*.npz
+*.pkl
+*.joblib
+*.model
+/submission*.tsv
+!/submission_final.tsv
+
+# Colab / Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+*.egg-info/
+.pytest_cache/
+
+# Secrets
+.env
+secrets.json
+*credentials*
+
+# OS
+.DS_Store
+Thumbs.db
