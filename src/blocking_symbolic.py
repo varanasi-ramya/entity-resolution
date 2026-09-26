@@ -12,8 +12,8 @@ import os, time, shutil
 import duckdb
 import jellyfish
 
-BLOCK_SIZE_CAP  = 2000   # drop a block if its candidate-side count exceeds this
-CAP_PER_ENTITY  = 50     # max candidates kept per S1 entity, per key type
+BLOCK_SIZE_CAP  = 500    # drop a block if its candidate-side count exceeds this
+CAP_PER_ENTITY  = 20     # max candidates kept per S1 entity, per key type
 
 
 def _register_udf(con):
